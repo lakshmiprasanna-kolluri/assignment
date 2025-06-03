@@ -1,0 +1,931 @@
+Problem Statement: : E-commerce Product Catalog
+
+Create a RESTful API to manage an e-commerce product catalog. The API should support product listing, filtering by category or price, and searching by product name.
+
+
+spring.datasource.url=jdbc:mysql://localhost:3306/ecommerce_db?useSSL=false&serverTimezone=UTC
+spring.datasource.username=your_mysql_user
+spring.datasource.password=your_mysql_password
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+import jakarta.persistence.*;
+import jakarta.validation.constraints.*;
+import lombok.*;
+
+@Entity
+@Table(name = "products")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Product {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long productId;
+
+    @NotBlank(message = "Product name is mandatory")
+    private String name;
+
+    private String description;
+
+    @NotNull
+    @DecimalMin(value = "0.0", inclusive = false, message = "Price must be positive")
+    private Double price;
+
+    @NotBlank(message = "Category is mandatory")
+    private String category;
+
+    @NotNull
+    @Min(value = 0, message = "Stock quantity must be non-negative")
+    private Integer stockQuantity;
+}
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+import java.util.List;
+
+public interface ProductRepository extends JpaRepository<Product, Long> {
+
+    // Search by name partial match
+    List<Product> findByNameContainingIgnoreCase(String name);
+
+    // Filter by category
+    List<Product> findByCategoryIgnoreCase(String category);
+
+    // Filter by price range
+    List<Product> findByPriceBetween(Double minPrice, Double maxPrice);
+
+    // Combined filter example (category + price range)
+    @Query("SELECT p FROM Product p WHERE (:category IS NULL OR LOWER(p.category) = LOWER(:category)) AND p.price BETWEEN :minPrice AND :maxPrice")
+    List<Product> filterProducts(@Param("category") String category,
+                                 @Param("minPrice") Double minPrice,
+                                 @Param("maxPrice") Double maxPrice);
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+
+@Service
+@Transactional
+public class ProductService {
+
+    @Autowired
+    private ProductRepository productRepo;
+
+    public Product addProduct(Product product) {
+        return productRepo.save(product);
+    }
+
+    public Product updateProduct(Long id, Product updatedProduct) {
+        Product product = productRepo.findById(id)
+            .orElseThrow(() -> new RuntimeException("Product not found"));
+        
+        product.setName(updatedProduct.getName());
+        product.setDescription(updatedProduct.getDescription());
+        product.setPrice(updatedProduct.getPrice());
+        product.setCategory(updatedProduct.getCategory());
+        product.setStockQuantity(updatedProduct.getStockQuantity());
+
+        return productRepo.save(product);
+    }
+
+    public void deleteProduct(Long id) {
+        productRepo.deleteById(id);
+    }
+
+    public Product getProduct(Long id) {
+        return productRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Product not found"));
+    }
+
+    public List<Product> getAllProducts() {
+        return productRepo.findAll();
+    }
+
+    public List<Product> searchByName(String name) {
+        return productRepo.findByNameContainingIgnoreCase(name);
+    }
+
+    public List<Product> filterByCategory(String category) {
+        return productRepo.findByCategoryIgnoreCase(category);
+    }
+
+    public List<Product> filterByPriceRange(Double minPrice, Double maxPrice) {
+        return productRepo.findByPriceBetween(minPrice, maxPrice);
+    }
+
+    public List<Product> filterProducts(String category, Double minPrice, Double maxPrice) {
+        if (minPrice == null) minPrice = 0.0;
+        if (maxPrice == null) maxPrice = Double.MAX_VALUE;
+        return productRepo.filterProducts(category, minPrice, maxPrice);
+    }
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
+
+import jakarta.validation.Valid;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/products")
+@Validated
+public class ProductController {
+
+    @Autowired
+    private ProductService productService;
+
+    @PostMapping
+    // Only ADMIN can add products (secured later)
+    public ResponseEntity<Product> addProduct(@Valid @RequestBody Product product) {
+        Product saved = productService.addProduct(product);
+        return ResponseEntity.status(201).body(saved);
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<Product> updateProduct(@PathVariable Long id, @Valid @RequestBody Product product) {
+        Product updated = productService.updateProduct(id, product);
+        return ResponseEntity.ok(updated);
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteProduct(@PathVariable Long id) {
+        productService.deleteProduct(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<Product> getProduct(@PathVariable Long id) {
+        Product product = productService.getProduct(id);
+        return ResponseEntity.ok(product);
+    }
+
+    @GetMapping
+    public ResponseEntity<List<Product>> listProducts(
+            @RequestParam(required = false) String category,
+            @RequestParam(required = false) Double minPrice,
+            @RequestParam(required = false) Double maxPrice,
+            @RequestParam(required = false) String search
+    ) {
+        List<Product> products;
+
+        if (search != null && !search.isEmpty()) {
+            products = productService.searchByName(search);
+        } else if (category != null || minPrice != null || maxPrice != null) {
+            products = productService.filterProducts(category, minPrice, maxPrice);
+        } else {
+            products = productService.getAllProducts();
+        }
+
+        return ResponseEntity.ok(products);
+    }
+}
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(RuntimeException.class)
+    public ResponseEntity<String> handleNotFound(RuntimeException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<String> handleValidationError(MethodArgumentNotValidException ex) {
+        String errorMsg = ex.getBindingResult().getFieldErrors()
+                .stream()
+                .map(fe -> fe.getField() + ": " + fe.getDefaultMessage())
+                .findFirst()
+                .orElse("Invalid input");
+        return ResponseEntity.badRequest().body(errorMsg);
+    }
+}
+import org.springframework.context.annotation.*;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf().disable()
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/api/products/**").hasAnyRole("ADMIN", "USER")
+                .anyRequest().authenticated()
+            )
+            .httpBasic();
+        return http.build();
+    }
+}
+
+
+
+
+
+Problem Statement:  Library Management System
+
+Build a system to manage library operations including book lending, returns, and inventory management.
+
+
+spring.datasource.url=jdbc:h2:mem:librarydb
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+spring.h2.console.enabled=true
+spring.jpa.hibernate.ddl-auto=update
+
+@Entity
+public class Book {
+    @Id @GeneratedValue
+    private Long bookId;
+    private String title;
+    private String author;
+    private String category;
+    private boolean available = true;  // availability
+
+    // getters/setters
+}
+
+@Entity
+public class User {
+    @Id @GeneratedValue
+    private Long userId;
+    private String name;
+    private String membershipType;
+
+    // getters/setters
+}
+
+@Entity
+public class Transaction {
+    @Id @GeneratedValue
+    private Long transactionId;
+
+    @ManyToOne
+    private Book book;
+
+    @ManyToOne
+    private User user;
+
+    private LocalDate issueDate;
+    private LocalDate returnDate;
+
+    // status: ISSUED, RETURNED, OVERDUE
+    private String status;
+
+    // getters/setters
+}
+public interface BookRepository extends JpaRepository<Book, Long> {
+    List<Book> findByTitleContainingIgnoreCase(String title);
+    List<Book> findByAuthorContainingIgnoreCase(String author);
+    List<Book> findByCategoryContainingIgnoreCase(String category);
+}
+
+public interface UserRepository extends JpaRepository<User, Long> {}
+
+public interface TransactionRepository extends JpaRepository<Transaction, Long> {
+    List<Transaction> findByUserUserId(Long userId);
+    List<Transaction> findByStatus(String status);
+    List<Transaction> findByReturnDateBeforeAndStatus(LocalDate date, String status);
+}
+@Service
+public class LibraryService {
+
+    @Autowired
+    private BookRepository bookRepo;
+    @Autowired
+    private UserRepository userRepo;
+    @Autowired
+    private TransactionRepository transRepo;
+
+    // Add book
+    public Book addBook(Book book) {
+        book.setAvailable(true);
+        return bookRepo.save(book);
+    }
+
+    // Remove book
+    public void removeBook(Long bookId) {
+        bookRepo.deleteById(bookId);
+    }
+
+    // Add user
+    public User addUser(User user) {
+        return userRepo.save(user);
+    }
+
+    // Remove user
+    public void removeUser(Long userId) {
+        userRepo.deleteById(userId);
+    }
+
+    // Lend book
+    @Transactional
+    public Transaction lendBook(Long bookId, Long userId) {
+        Book book = bookRepo.findById(bookId).orElseThrow(() -> new RuntimeException("Book not found"));
+        if (!book.isAvailable()) throw new RuntimeException("Book not available");
+
+        User user = userRepo.findById(userId).orElseThrow(() -> new RuntimeException("User not found"));
+
+        book.setAvailable(false);
+        bookRepo.save(book);
+
+        Transaction transaction = new Transaction();
+        transaction.setBook(book);
+        transaction.setUser(user);
+        transaction.setIssueDate(LocalDate.now());
+        transaction.setStatus("ISSUED");
+
+        return transRepo.save(transaction);
+    }
+
+    // Return book
+    @Transactional
+    public Transaction returnBook(Long transactionId) {
+        Transaction transaction = transRepo.findById(transactionId).orElseThrow(() -> new RuntimeException("Transaction not found"));
+
+        if (!"ISSUED".equals(transaction.getStatus())) throw new RuntimeException("Book not issued");
+
+        transaction.setReturnDate(LocalDate.now());
+        transaction.setStatus("RETURNED");
+
+        Book book = transaction.getBook();
+        book.setAvailable(true);
+        bookRepo.save(book);
+
+        return transRepo.save(transaction);
+    }
+
+    // Search books
+    public List<Book> searchBooks(String title, String author, String category) {
+        if (title != null && !title.isEmpty()) return bookRepo.findByTitleContainingIgnoreCase(title);
+        if (author != null && !author.isEmpty()) return bookRepo.findByAuthorContainingIgnoreCase(author);
+        if (category != null && !category.isEmpty()) return bookRepo.findByCategoryContainingIgnoreCase(category);
+        return bookRepo.findAll();
+    }
+
+    // Get overdue books
+    public List<Transaction> getOverdueBooks() {
+        LocalDate today = LocalDate.now();
+        return transRepo.findByReturnDateBeforeAndStatus(today, "ISSUED");
+    }
+
+    // User borrowing history
+    public List<Transaction> getUserHistory(Long userId) {
+        return transRepo.findByUserUserId(userId);
+    }
+}
+@RestController
+@RequestMapping("/api")
+public class LibraryController {
+
+    @Autowired
+    private LibraryService libraryService;
+
+    // Add book
+    @PostMapping("/books")
+    public Book addBook(@RequestBody Book book) {
+        return libraryService.addBook(book);
+    }
+
+    // Remove book
+    @DeleteMapping("/books/{id}")
+    public void removeBook(@PathVariable Long id) {
+        libraryService.removeBook(id);
+    }
+
+    // Add user
+    @PostMapping("/users")
+    public User addUser(@RequestBody User user) {
+        return libraryService.addUser(user);
+    }
+
+    // Remove user
+    @DeleteMapping("/users/{id}")
+    public void removeUser(@PathVariable Long id) {
+        libraryService.removeUser(id);
+    }
+
+    // Lend book
+    @PostMapping("/lend")
+    public Transaction lendBook(@RequestParam Long bookId, @RequestParam Long userId) {
+        return libraryService.lendBook(bookId, userId);
+    }
+
+    // Return book
+    @PostMapping("/return")
+    public Transaction returnBook(@RequestParam Long transactionId) {
+        return libraryService.returnBook(transactionId);
+    }
+
+    // Search books
+    @GetMapping("/books/search")
+    public List<Book> searchBooks(
+        @RequestParam(required = false) String title,
+        @RequestParam(required = false) String author,
+        @RequestParam(required = false) String category) {
+        return libraryService.searchBooks(title, author, category);
+    }
+
+    // Overdue books report
+    @GetMapping("/reports/overdue")
+    public List<Transaction> getOverdueBooks() {
+        return libraryService.getOverdueBooks();
+    }
+
+    // User borrowing history
+    @GetMapping("/reports/user-history/{userId}")
+    public List<Transaction> getUserHistory(@PathVariable Long userId) {
+        return libraryService.getUserHistory(userId);
+    }
+}
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig extends WebSecurityConfigurerAdapter {
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+          .csrf().disable()
+          .authorizeRequests()
+          .antMatchers("/api/**").authenticated()
+          .and()
+          .httpBasic();
+    }
+
+    @Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication()
+            .withUser("librarian")
+            .password("{noop}password")
+            .roles("LIBRARIAN");
+    }
+}
+
+
+Problem Statement:  Student Management System  
+
+
+Develop a Spring Boot application to manage student information for an educational institute. The system should allow the institute to add, update, delete, and view student records efficiently, along with searching and filtering capabilities.
+
+
+import jakarta.persistence.*;
+import jakarta.validation.constraints.*;
+
+@Entity
+public class Student {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long studentId;
+
+    @NotBlank(message = "Name is required")
+    private String name;
+
+    @Min(value = 3, message = "Age must be at least 3")
+    @Max(value = 100, message = "Age must be less than 100")
+    private int age;
+
+    @NotBlank(message = "Class is required")
+    private String studentClass;
+
+    @Email(message = "Email should be valid")
+    private String email;
+
+    @NotBlank(message = "Address is required")
+    private String address;
+
+    // getters and setters
+}
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface StudentRepository extends JpaRepository<Student, Long> {
+
+    Page<Student> findByNameContainingIgnoreCase(String name, Pageable pageable);
+
+    Page<Student> findByStudentClassContainingIgnoreCase(String studentClass, Pageable pageable);
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.*;
+import org.springframework.stereotype.Service;
+
+@Service
+public class StudentService {
+
+    @Autowired
+    private StudentRepository studentRepo;
+
+    public Page<Student> getAllStudents(int pageNo, int pageSize) {
+        Pageable pageable = PageRequest.of(pageNo, pageSize);
+        return studentRepo.findAll(pageable);
+    }
+
+    public Page<Student> searchByName(String name, int pageNo, int pageSize) {
+        Pageable pageable = PageRequest.of(pageNo, pageSize);
+        return studentRepo.findByNameContainingIgnoreCase(name, pageable);
+    }
+
+    public Page<Student> searchByClass(String studentClass, int pageNo, int pageSize) {
+        Pageable pageable = PageRequest.of(pageNo, pageSize);
+        return studentRepo.findByStudentClassContainingIgnoreCase(studentClass, pageable);
+    }
+
+    public Student saveStudent(Student student) {
+        return studentRepo.save(student);
+    }
+
+    public Student getStudentById(Long id) {
+        return studentRepo.findById(id).orElse(null);
+    }
+
+    public void deleteStudent(Long id) {
+        studentRepo.deleteById(id);
+    }
+}
+import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.stereotype.Controller;
+import org.springframework.ui.Model;
+import org.springframework.validation.BindingResult;
+import org.springframework.web.bind.annotation.*;
+
+@Controller
+@RequestMapping("/students")
+public class StudentController {
+
+    @Autowired
+    private StudentService studentService;
+
+    private final int PAGE_SIZE = 5;
+
+    // List students with pagination and optional search
+    @GetMapping
+    public String listStudents(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(required = false) String name,
+            @RequestParam(required = false) String studentClass,
+            Model model) {
+
+        Page<Student> studentPage;
+
+        if (name != null && !name.isEmpty()) {
+            studentPage = studentService.searchByName(name, page, PAGE_SIZE);
+        } else if (studentClass != null && !studentClass.isEmpty()) {
+            studentPage = studentService.searchByClass(studentClass, page, PAGE_SIZE);
+        } else {
+            studentPage = studentService.getAllStudents(page, PAGE_SIZE);
+        }
+
+        model.addAttribute("students", studentPage.getContent());
+        model.addAttribute("currentPage", page);
+        model.addAttribute("totalPages", studentPage.getTotalPages());
+        model.addAttribute("name", name);
+        model.addAttribute("studentClass", studentClass);
+
+        return "students/list";
+    }
+
+    // Show form for new student
+    @GetMapping("/new")
+    public String showCreateForm(Student student) {
+        return "students/add";
+    }
+
+    // Save new student
+    @PostMapping
+    public String saveStudent(@Valid Student student, BindingResult result, Model model) {
+        if (result.hasErrors()) {
+            return "students/add";
+        }
+        studentService.saveStudent(student);
+        return "redirect:/students";
+    }
+
+    // Show form for edit
+    @GetMapping("/edit/{id}")
+    public String showUpdateForm(@PathVariable("id") Long id, Model model) {
+        Student student = studentService.getStudentById(id);
+        if (student == null) {
+            model.addAttribute("errorMessage", "Student not found");
+            return "error";
+        }
+        model.addAttribute("student", student);
+        return "students/edit";
+    }
+
+    // Update student
+    @PostMapping("/update/{id}")
+    public String updateStudent(@PathVariable("id") Long id, @Valid Student student,
+                                BindingResult result, Model model) {
+        if (result.hasErrors()) {
+            student.setStudentId(id);
+            return "students/edit";
+        }
+        studentService.saveStudent(student);
+        return "redirect:/students";
+    }
+
+    // Delete student
+    @GetMapping("/delete/{id}")
+    public String deleteStudent(@PathVariable("id") Long id) {
+        studentService.deleteStudent(id);
+        return "redirect:/students";
+    }
+}
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Student List</title>
+</head>
+<body>
+<h2>Students</h2>
+
+<form th:action="@{/students}" method="get">
+    <input type="text" name="name" placeholder="Search by Name" th:value="${name}">
+    <input type="text" name="studentClass" placeholder="Search by Class" th:value="${studentClass}">
+    <button type="submit">Search</button>
+    <a th:href="@{/students}">Clear</a>
+</form>
+
+<a th:href="@{/students/new}">Add New Student</a>
+
+<table border="1">
+    <tr>
+        <th>Name</th><th>Age</th><th>Class</th><th>Email</th><th>Address</th><th>Actions</th>
+    </tr>
+    <tr th:each="student : ${students}">
+        <td th:text="${student.name}"></td>
+        <td th:text="${student.age}"></td>
+        <td th:text="${student.studentClass}"></td>
+        <td th:text="${student.email}"></td>
+        <td th:text="${student.address}"></td>
+        <td>
+            <a th:href="@{'/students/edit/' + ${student.studentId}}">Edit</a> |
+            <a th:href="@{'/students/delete/' + ${student.studentId}}" onclick="return confirm('Are you sure?')">Delete</a>
+        </td>
+    </tr>
+</table>
+
+<div>
+    <span>Page [[${currentPage + 1}]] of [[${totalPages}]]</span>
+</div>
+
+<div>
+    <span th:if="${currentPage > 0}">
+        <a th:href="@{|/students?page=${currentPage - 1}|}">Previous</a>
+    </span>
+    <span th:if="${currentPage + 1 < totalPages}">
+        <a th:href="@{|/students?page=${currentPage + 1}|}">Next</a>
+    </span>
+</div>
+
+</body>
+</html>
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Add Student</title>
+</head>
+<body>
+<h2>Add New Student</h2>
+
+<form th:action="@{/students}" th:object="${student}" method="post">
+    <label>Name:</label>
+    <input type="text" th:field="*{name}"/>
+    <span th:if="${#fields.hasErrors('name')}" th:errors="*{name}"></span><br/>
+
+    <label>Age:</label>
+    <input type="number" th:field="*{age}"/>
+    <span th:if="${#fields.hasErrors('age')}" th:errors="*{age}"></span><br/>
+
+    <label>Class:</label>
+    <input type="text" th:field="*{studentClass}"/>
+    <span th:if="${#fields.hasErrors('studentClass')}" th:errors="*{studentClass}"></span><br/>
+
+    <label>Email:</label>
+    <input type="email" th:field="*{email}"/>
+    <span th:if="${#fields.hasErrors('email')}" th:errors="*{email}"></span><br/>
+
+    <label>Address:</label>
+    <input type="text" th:field="*{address}"/>
+    <span th:if="${#fields.hasErrors('address')}" th:errors="*{address}"></span>
+
+
+
+Problem Statement:  Employee Attendance Tracker
+
+Develop an application to track employee attendance within an organization. The system should allow employees to mark attendance and managers to view attendance reports.
+
+
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Table(name = "employees")
+public class Employee {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long employeeId;
+
+    private String name;
+    private String department;
+    private String designation;
+
+    private String username;  // for login
+    private String password;  // encrypted password
+
+    private String role;  // ROLE_EMPLOYEE or ROLE_MANAGER
+}
+import jakarta.persistence.*;
+import lombok.*;
+import java.time.LocalDate;
+
+@Entity
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Table(name = "attendance")
+public class Attendance {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long attendanceId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "employee_id")
+    private Employee employee;
+
+    private LocalDate date;
+
+    @Enumerated(EnumType.STRING)
+    private Status status;
+
+    public enum Status {
+        PRESENT,
+        ABSENT
+    }
+}
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Optional;
+
+public interface EmployeeRepository extends JpaRepository<Employee, Long> {
+    Optional<Employee> findByUsername(String username);
+}
+
+public interface AttendanceRepository extends JpaRepository<Attendance, Long> {
+    Optional<Attendance> findByEmployeeAndDate(Employee employee, LocalDate date);
+    List<Attendance> findByEmployee(Employee employee);
+    List<Attendance> findByEmployee_Department(String department);
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.time.LocalDate;
+import java.util.List;
+
+@Service
+public class AttendanceService {
+
+    @Autowired
+    private AttendanceRepository attendanceRepo;
+
+    @Autowired
+    private EmployeeRepository employeeRepo;
+
+    public Attendance markAttendance(Long employeeId, Attendance.Status status) {
+        Employee employee = employeeRepo.findById(employeeId)
+            .orElseThrow(() -> new RuntimeException("Employee not found"));
+
+        LocalDate today = LocalDate.now();
+
+        // Check if attendance already marked for today
+        attendanceRepo.findByEmployeeAndDate(employee, today).ifPresent(a -> {
+            throw new RuntimeException("Attendance already marked for today");
+        });
+
+        Attendance attendance = new Attendance();
+        attendance.setEmployee(employee);
+        attendance.setDate(today);
+        attendance.setStatus(status);
+
+        return attendanceRepo.save(attendance);
+    }
+
+    public List<Attendance> getAttendanceByEmployee(Long employeeId) {
+        Employee employee = employeeRepo.findById(employeeId)
+            .orElseThrow(() -> new RuntimeException("Employee not found"));
+        return attendanceRepo.findByEmployee(employee);
+    }
+
+    public List<Attendance> getAttendanceByDepartment(String department) {
+        return attendanceRepo.findByEmployee_Department(department);
+    }
+}
+import org.springframework.context.annotation.*;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.core.userdetails.*;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public UserDetailsService userDetailsService(EmployeeRepository employeeRepo) {
+        return username -> employeeRepo.findByUsername(username)
+            .map(employee -> User.builder()
+                .username(employee.getUsername())
+                .password(employee.getPassword())
+                .roles(employee.getRole().replace("ROLE_", ""))
+                .build())
+            .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+          .csrf().disable()
+          .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/attendance/mark").hasRole("EMPLOYEE")
+            .requestMatchers("/attendance/reports/**").hasRole("MANAGER")
+            .anyRequest().authenticated()
+          )
+          .httpBasic();
+        return http.build();
+    }
+}
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/attendance")
+public class AttendanceController {
+
+    @Autowired
+    private AttendanceService attendanceService;
+
+    @Autowired
+    private EmployeeRepository employeeRepo;
+
+    // Mark attendance for logged in employee
+    @PostMapping("/mark")
+    public Attendance markAttendance(@RequestParam Attendance.Status status, Authentication auth) {
+        String username = auth.getName();
+        Employee employee = employeeRepo.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return attendanceService.markAttendance(employee.getEmployeeId(), status);
+    }
+
+    // View own attendance history (employee role)
+    @GetMapping("/my")
+    public List<Attendance> getMyAttendance(Authentication auth) {
+        String username = auth.getName();
+        Employee employee = employeeRepo.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return attendanceService.getAttendanceByEmployee(employee.getEmployeeId());
+    }
+
+    // Manager: View attendance by department
+    @GetMapping("/reports/department/{department}")
+    public List<Attendance> getAttendanceByDepartment(@PathVariable String department) {
+        return attendanceService.getAttendanceByDepartment(department);
+    }
+}
+
+
+
